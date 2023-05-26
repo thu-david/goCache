@@ -5,6 +5,8 @@ import (
 	"goCache/caches"
 	"io/ioutil"
 	"net/http"
+	"path"
+	"strconv"
 
 	"github.com/julienschmidt/httprouter"
 )
@@ -23,12 +25,17 @@ func (hs* HTTPServer) Run(address string) error {
 	return http.ListenAndServe(address, hs.routerHandler())
 }
 
+func wrapUriWithVersion(uri string) string {
+	return path.Join("/", APIVersion, uri)
+}
+
 func (hs* HTTPServer) routerHandler() http.Handler {
+
 	router := httprouter.New()
-	router.GET("/cache/:key", hs.getHandler)
-	router.PUT("/cache/:key", hs.setHandler)
-	router.DELETE("/cache/:key", hs.deleteHandler)
-	router.GET("/status", hs.statusHandler)
+	router.GET(wrapUriWithVersion("/cache/:key"), hs.getHandler)
+	router.PUT(wrapUriWithVersion("/cache/:key"), hs.setHandler)
+	router.DELETE(wrapUriWithVersion("/cache/:key"), hs.deleteHandler)
+	router.GET(wrapUriWithVersion("/status"), hs.statusHandler)
 	return router
 
 }
@@ -49,7 +56,26 @@ func (hs* HTTPServer) setHandler(w http.ResponseWriter, request *http.Request, p
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	hs.cache.Set(key, value)
+	ttl, err := ttlOf(request)
+	if err!=nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	err = hs.cache.SetWithTTL(key, value, ttl)
+	if err!=nil {
+		w.WriteHeader(http.StatusRequestEntityTooLarge)
+		w.Write([]byte("ERROR:"+err.Error()))
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+}
+
+func ttlOf(request *http.Request) (int64, error) {
+	ttls, ok := request.Header["Ttl"]
+	if !ok || len(ttls) < 1 {
+		return caches.NeverDie, nil
+	}
+	return strconv.ParseInt(ttls[0], 10, 64)
 }
 
 func (hs* HTTPServer) deleteHandler(w http.ResponseWriter, request *http.Request, params httprouter.Params){
@@ -58,9 +84,7 @@ func (hs* HTTPServer) deleteHandler(w http.ResponseWriter, request *http.Request
 }
 
 func (hs* HTTPServer) statusHandler(w http.ResponseWriter, request *http.Request, params httprouter.Params){
-	status, err := json.Marshal(map[string]interface{}{
-		"count" : hs.cache.Count(),
-	})
+	status, err := json.Marshal(hs.cache.Status())
 	if err!=nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
